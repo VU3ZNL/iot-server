@@ -1,0 +1,185 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Radio Buoy - live</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+<style>
+  :root { --bg:#0b1220; --panel:#131c2e; --line:#223049; --txt:#e6edf7; --mut:#8aa0bf; --ok:#34d399; --warn:#fbbf24; --bad:#f43f5e; --acc:#38bdf8; }
+  @media (prefers-color-scheme: light) { :root { --bg:#f3f6fb; --panel:#fff; --line:#d9e2ef; --txt:#122033; --mut:#5b6e8a; } }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--txt); font:14px/1.45 system-ui,-apple-system,Segoe UI,Roboto,sans-serif; }
+  header { display:flex; flex-wrap:wrap; gap:10px; align-items:center; justify-content:space-between; padding:12px 16px; border-bottom:1px solid var(--line); background:var(--panel); position:sticky; top:0; z-index:5; }
+  h1 { font-size:17px; margin:0; letter-spacing:.3px; }
+  .pill { display:inline-flex; align-items:center; gap:6px; padding:3px 10px; border-radius:99px; border:1px solid var(--line); font-size:12px; color:var(--mut); }
+  .dot { width:8px; height:8px; border-radius:50%; background:var(--bad); }
+  .live .dot { background:var(--ok); box-shadow:0 0 0 3px #34d39933; }
+  #sos { display:none; margin:12px 16px 0; padding:12px 16px; border-radius:10px; background:var(--bad); color:#fff; font-weight:600; animation:blink 1s infinite; }
+  @keyframes blink { 50% { opacity:.65; } }
+  main { display:grid; gap:14px; padding:14px 16px 28px; grid-template-columns:minmax(0,1.4fr) minmax(0,1fr); }
+  @media (max-width:900px) { main { grid-template-columns:minmax(0,1fr); } }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:12px 14px; }
+  .card h2 { font-size:13px; margin:0 0 8px; color:var(--mut); text-transform:uppercase; letter-spacing:.6px; font-weight:600; }
+  #map { height:420px; border-radius:10px; border:1px solid var(--line); }
+  #units { display:grid; gap:12px; }
+  .unit.sos { border-color:var(--bad); box-shadow:0 0 0 2px #f43f5e44; }
+  .unit .top { display:flex; justify-content:space-between; align-items:center; gap:8px; margin-bottom:6px; }
+  .unit .name { font-weight:700; font-size:15px; }
+  .chip { font-size:11px; padding:2px 8px; border-radius:99px; font-weight:600; background:#34d39922; color:var(--ok); }
+  .chip.sos { background:#f43f5e22; color:var(--bad); }
+  .chip.lost { background:#fbbf2422; color:var(--warn); }
+  .grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:4px 14px; }
+  .kv { display:flex; justify-content:space-between; gap:8px; border-bottom:1px dashed var(--line); padding:2px 0; }
+  .kv span:first-child { color:var(--mut); }
+  .big { font-size:22px; font-weight:700; }
+  .spark { width:100%; height:54px; }
+  ul { list-style:none; margin:0; padding:0; }
+  li { padding:6px 0; border-bottom:1px dashed var(--line); }
+  li:last-child { border-bottom:0; }
+  .mut { color:var(--mut); }
+  a { color:var(--acc); }
+  .wide { grid-column:1/-1; }
+</style>
+</head>
+<body>
+<header>
+  <h1>&#9875; Radio Buoy &middot; live</h1>
+  <div style="display:flex;gap:8px;flex-wrap:wrap">
+    <span class="pill" id="conn"><span class="dot"></span><span id="connTxt">connecting</span></span>
+    <span class="pill" id="baseState">base: &ndash;</span>
+  </div>
+</header>
+<div id="sos" role="alert"></div>
+<main>
+  <section class="card">
+    <h2>Map</h2>
+    <div id="map"></div>
+    <div class="mut" id="brgLine" style="margin-top:8px"></div>
+  </section>
+  <section id="units"></section>
+  <section class="card">
+    <h2>Buoy trend &middot; last 60 min</h2>
+    <div class="grid">
+      <div><div class="mut">Temperature <b id="tNow"></b></div><svg class="spark" id="spT" viewBox="0 0 200 54" preserveAspectRatio="none"></svg></div>
+      <div><div class="mut">Pressure <b id="pNow"></b></div><svg class="spark" id="spP" viewBox="0 0 200 54" preserveAspectRatio="none"></svg></div>
+    </div>
+  </section>
+  <section class="card">
+    <h2>SOS history</h2>
+    <ul id="alerts"><li class="mut">none</li></ul>
+  </section>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<script>
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
+const ROLE = { BUOY:'#f97316', BASE:'#38bdf8', RELAY:'#a78bfa' };
+let snap = null, gotAt = 0, firstFit = true;
+
+const map = L.map('map', { zoomControl:true }).setView([12.97, 77.59], 5);
+L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom:19, attribution:'&copy; OpenStreetMap contributors' }).addTo(map);
+const markers = new Map();
+let line = null;
+
+const fmt = (v, d = 1, u = '') => (v === undefined || v === null ? '\u2013' : Number(v).toFixed(d) + u);
+const ageS = (u) => Math.max(0, Math.round((snap.serverTime - u.lastSeen + (Date.now() - gotAt)) / 1000));
+const dist = (m) => (m < 1000 ? Math.round(m) + ' m' : (m / 1000).toFixed(m < 10000 ? 2 : 1) + ' km');
+const card = (u) => {
+  const age = ageS(u), lost = !u.alive && age > 8;
+  const chip = u.sos ? `<span class="chip sos">SOS ${esc(u.reason)}</span>` : lost ? `<span class="chip lost">LOST ${age}s</span>` : `<span class="chip">OK</span>`;
+  const kv = (k, v) => `<div class="kv"><span>${k}</span><span>${v}</span></div>`;
+  const pos = u.lat !== undefined ? `${u.lat.toFixed(6)}, ${u.lon.toFixed(6)}${u.fix ? '' : ' (old)'}` : 'no fix';
+  const map_ = u.lat !== undefined ? ` <a target="_blank" rel="noopener" href="https://www.google.com/maps/search/?api=1&query=${u.lat},${u.lon}">open</a>` : '';
+  return `<div class="card unit ${u.sos ? 'sos' : ''}">
+    <div class="top"><span class="name">${esc(u.role || 'NODE')} #${u.id}</span>${chip}</div>
+    <div class="grid">
+      ${kv('Position', pos + map_)}
+      ${kv('Sats', u.sats ?? '\u2013')}
+      ${kv('Temp', fmt(u.temp, 1, ' \u00b0C'))}
+      ${kv('Pressure', fmt(u.pres, 1, ' hPa'))}
+      ${kv('Altitude', fmt(u.alt, 0, ' m'))}
+      ${kv('Roll / Pitch', (u.roll ?? '\u2013') + ' / ' + (u.pitch ?? '\u2013'))}
+      ${kv('Speed', fmt(u.speed, 1, ' km/h'))}
+      ${kv('Heading', u.heading !== undefined ? u.heading + '\u00b0' : (u.course !== undefined ? u.course + '\u00b0' : '\u2013'))}
+      ${u.csq !== undefined ? kv('Network', esc(u.op || '?') + ' \u00b7 CSQ ' + u.csq) : ''}
+      ${u.role !== 'BASE' ? kv('Mesh', (u.hops === 0 ? 'direct' : u.hops + ' hop') + ' \u00b7 ' + (u.link ?? 0) + '%') : ''}
+      ${u.role === 'BUOY' ? kv('Relay', u.relay ? 'ON' : 'off') : ''}
+      ${kv('Last seen', age + ' s ago')}
+    </div></div>`;
+};
+
+function render() {
+  if (!snap) return;
+  $('units').innerHTML = snap.units.map(card).join('') || '<div class="card mut">waiting for the first upload&hellip;</div>';
+
+  const sosUnits = snap.units.filter((u) => u.sos);
+  const b = $('sos');
+  if (sosUnits.length) {
+    b.style.display = 'block';
+    b.textContent = 'SOS: ' + sosUnits.map((u) => `${u.role || 'unit'} #${u.id} ${u.reason}`).join(' | ');
+    document.title = '\u26a0 SOS - Radio Buoy';
+  } else { b.style.display = 'none'; document.title = 'Radio Buoy - live'; }
+
+  const baseAge = snap.baseSeen ? Math.round((snap.serverTime - snap.baseSeen + (Date.now() - gotAt)) / 1000) : null;
+  $('baseState').textContent = baseAge === null ? 'base: never' : baseAge > 20 ? `base: offline ${baseAge}s` : `base #${snap.base.node} \u00b7 WiFi ${snap.base.rssi} dBm`;
+
+  const t = snap.base && snap.base.toBuoy;
+  $('brgLine').innerHTML = t ? `From base to buoy #${t.id}: bearing <b>${t.brg}\u00b0</b>, distance <b>${dist(t.dist)}</b>` : '<span class="mut">bearing: needs a GPS fix on both units</span>';
+
+  const pts = [];
+  for (const u of snap.units) {
+    if (u.lat === undefined) continue;
+    const col = u.sos ? '#f43f5e' : (ROLE[u.role] || '#94a3b8');
+    let m = markers.get(u.id);
+    if (!m) { m = L.circleMarker([u.lat, u.lon], { radius:9, weight:2, fillOpacity:.85 }).addTo(map); markers.set(u.id, m); }
+    m.setLatLng([u.lat, u.lon]).setStyle({ color:col, fillColor:col, radius: u.sos ? 12 : 9 });
+    m.bindTooltip(`${u.role || 'node'} #${u.id}`, { permanent:true, direction:'top', offset:[0, -8] });
+    pts.push([u.lat, u.lon]);
+  }
+  const bu = snap.units.find((u) => u.role === 'BUOY' && u.lat !== undefined), ba = snap.units.find((u) => u.role === 'BASE' && u.lat !== undefined);
+  if (line) { map.removeLayer(line); line = null; }
+  if (bu && ba) line = L.polyline([[ba.lat, ba.lon], [bu.lat, bu.lon]], { color:'#94a3b8', weight:2, dashArray:'6 6' }).addTo(map);
+  if (pts.length && firstFit) { map.fitBounds(pts, { padding:[50, 50], maxZoom:16 }); firstFit = false; }
+}
+
+function spark(svg, data, color) {
+  if (data.length < 2) { svg.innerHTML = ''; return; }
+  const xs = data.map((d) => d.t), ys = data.map((d) => d.v);
+  const x0 = Math.min(...xs), x1 = Math.max(...xs), y0 = Math.min(...ys), y1 = Math.max(...ys), dy = (y1 - y0) || 1;
+  const p = data.map((d) => `${((d.t - x0) / ((x1 - x0) || 1) * 200).toFixed(1)},${(50 - (d.v - y0) / dy * 46).toFixed(1)}`).join(' ');
+  svg.innerHTML = `<polyline points="${p}" fill="none" stroke="${color}" stroke-width="1.6" vector-effect="non-scaling-stroke"/>`;
+}
+async function trends() {
+  try {
+    const bu = snap && snap.units.find((u) => u.role === 'BUOY');
+    if (!bu) return;
+    const h = await (await fetch(`/api/history/${bu.id}?minutes=60`)).json();
+    const T = h.filter((p) => p.temp !== undefined).map((p) => ({ t:p.t, v:p.temp }));
+    const P = h.filter((p) => p.pres !== undefined).map((p) => ({ t:p.t, v:p.pres }));
+    spark($('spT'), T, '#f97316'); spark($('spP'), P, '#38bdf8');
+    $('tNow').textContent = T.length ? T[T.length - 1].v.toFixed(1) + ' \u00b0C' : '';
+    $('pNow').textContent = P.length ? P[P.length - 1].v.toFixed(1) + ' hPa' : '';
+  } catch (e) { /* ignore */ }
+}
+function renderAlerts(list) {
+  $('alerts').innerHTML = list.length ? list.slice(0, 15).map((a) =>
+    `<li><b>${esc(a.role || 'unit')} #${a.id}</b> &middot; ${esc(a.reason || 'alert')} <span class="mut">${new Date(a.t).toLocaleString()}</span>` +
+    (a.lat !== undefined ? ` &middot; <a target="_blank" rel="noopener" href="https://www.google.com/maps/search/?api=1&query=${a.lat},${a.lon}">map</a>` : '') +
+    (a.toBuoy ? ` &middot; <span class="mut">${a.toBuoy.brg}\u00b0 / ${dist(a.toBuoy.dist)} from base</span>` : '') + '</li>').join('') : '<li class="mut">none</li>';
+}
+async function loadAlerts() { try { renderAlerts(await (await fetch('/api/alerts')).json()); } catch (e) {} }
+
+const es = new EventSource('/api/stream');
+es.onopen = () => { $('conn').classList.add('live'); $('connTxt').textContent = 'live'; };
+es.onerror = () => { $('conn').classList.remove('live'); $('connTxt').textContent = 'reconnecting'; };
+es.addEventListener('update', (e) => { snap = JSON.parse(e.data); gotAt = Date.now(); render(); });
+es.addEventListener('alert', () => loadAlerts());
+setInterval(render, 1000);       // keeps the "x s ago" counters ticking
+setInterval(trends, 30000);
+loadAlerts();
+setTimeout(trends, 1500);
+</script>
+</body>
+</html>

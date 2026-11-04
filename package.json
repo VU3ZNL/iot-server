@@ -1,0 +1,9 @@
+{
+  "name": "radio-buoy-iot-server",
+  "version": "4.0.0",
+  "description": "Collects Radio Buoy data from the base unit and broadcasts it live (dashboard, SSE, Telegram, webhook)",
+  "main": "server.js",
+  "scripts": { "start": "node server.js" },
+  "engines": { "node": ">=18" },
+  "dependencies": { "express": "^4.19.2" }
+}
